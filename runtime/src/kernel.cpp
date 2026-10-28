@@ -477,6 +477,8 @@ void dump() {
 }
 
 void handle_syscall(Cpu &c, std::uint32_t pc) {
+    static const int cost = std::getenv("PS2_SYSCALL_CYCLES") ? std::atoi(std::getenv("PS2_SYSCALL_CYCLES")) : 300;
+    c.budget -= cost;
     std::uint32_t n = c.r[3].w[0];
     const bool interrupt_variant = (n & 0x80000000u) != 0;
     if (interrupt_variant) n = 0u - n;
