@@ -29,9 +29,11 @@ struct Snr2Module {
     std::uint32_t code_end{};
     Links links;
     std::vector<std::uint32_t> seeds;
+    std::vector<std::uint32_t> host_seeds;
 };
 
 std::optional<Snr2Module> read_snr2_module(std::vector<std::uint8_t> bytes);
+std::optional<Snr2Module> read_xff_module(std::vector<std::uint8_t> bytes, const std::string &name);
 Links snr2_imports(const Image &image);
 Image snr2_image(const Snr2Module &module);
 

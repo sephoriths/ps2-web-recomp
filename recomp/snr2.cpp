@@ -9,6 +9,7 @@ namespace recomp {
 namespace {
 
 constexpr std::uint32_t kMagic = 0x32524E53u;
+constexpr std::uint32_t kXffMagic = 0x32666678u;
 
 std::uint32_t u32(const std::vector<std::uint8_t> &b, std::uint32_t o) {
     std::uint32_t v = 0;
@@ -110,6 +111,69 @@ std::optional<Snr2Module> read_snr2_module(std::vector<std::uint8_t> bytes) {
         m.links[at] = {*fix, true, 0};
         if (symbol < nsym && (kinds[symbol] == 0 || kinds[symbol] == 2 || kinds[symbol] == 3) && *fix == Fix::Jump)
             m.seeds.push_back(u32(bytes, sym + symbol * 12u + 4u) + u32(bytes, rel + k * 12u + 8u));
+    }
+    m.bytes = std::move(bytes);
+    m.bytes.resize(m.size);
+    return m;
+}
+
+std::optional<Snr2Module> read_xff_module(std::vector<std::uint8_t> bytes, const std::string &name) {
+    if (bytes.size() < 0x70 || u32(bytes, 0) != kXffMagic) return std::nullopt;
+    Snr2Module m;
+    m.size = u32(bytes, 0x14);
+    const std::uint32_t sections = u32(bytes, 0x5C), nsec = u32(bytes, 0x40), symbols = u32(bytes, 0x54), nsym = u32(bytes, 0x24);
+    const std::uint32_t records = u32(bytes, 0x64), nrec = u32(bytes, 0x38);
+    if (m.size > bytes.size() || nsec < 2 || sections + nsec * 0x20u > m.size || symbols + nsym * 16u > m.size || records + nrec * 0x1Cu > m.size)
+        return std::nullopt;
+    std::string clean;
+    for (char ch : name) clean += std::isalnum(static_cast<unsigned char>(ch)) ? ch : '_';
+    m.name = clean.empty() ? "module" : clean;
+    m.code_begin = u32(bytes, sections + 0x20 + 0x1C);
+    m.code_end = m.code_begin + u32(bytes, sections + 0x20 + 0x08);
+    if (u32(bytes, sections + 0x20 + 0x10) != 1 || m.code_end > m.size || m.code_begin >= m.code_end) return std::nullopt;
+
+    m.seeds.push_back(m.code_begin + u32(bytes, 0x4C));
+    for (std::uint32_t k = 0; k < nsym; ++k) {
+        const std::uint32_t at = symbols + k * 16u;
+        if ((bytes[at + 12] & 0xFu) != 2) continue;
+        if (u16(bytes, at + 14) == 1) m.seeds.push_back(m.code_begin + u32(bytes, at + 4));
+        else if (u16(bytes, at + 14) == 0xFFF1) m.host_seeds.push_back(u32(bytes, at + 4));
+    }
+    const auto in_text = [&](std::uint32_t symbol, std::uint32_t &value) {
+        if (symbol >= nsym || u16(bytes, symbols + symbol * 16u + 14u) != 1) return false;
+        value = u32(bytes, symbols + symbol * 16u + 4u);
+        return true;
+    };
+    const auto seed = [&](std::uint32_t offset) {
+        if (!(offset & 3u) && m.code_begin + offset < m.code_end) m.seeds.push_back(m.code_begin + offset);
+    };
+    for (std::uint32_t k = 0; k < nrec; ++k) {
+        const std::uint32_t at = records + k * 0x1Cu;
+        const std::uint32_t count = u32(bytes, at + 4), table = u32(bytes, at + 20), target = u32(bytes, at + 8);
+        if (u32(bytes, at) != 9 || target >= nsec || table + count * 8u > m.size) continue;
+        const std::uint32_t section = u32(bytes, sections + target * 0x20u + 0x1C), section_size = u32(bytes, sections + target * 0x20u + 0x08);
+        std::uint32_t high_at = 0, high_symbol = ~0u;
+        for (std::uint32_t r = 0; r < count; ++r) {
+            const std::uint32_t offset = u32(bytes, table + r * 8u), info = u32(bytes, table + r * 8u + 4u);
+            const std::uint32_t type = info & 0xFFu, symbol = info >> 8;
+            if (offset >= section_size || !section) continue;
+            std::uint32_t value = 0;
+            if (target == 1) {
+                const auto fix = fix_of(type);
+                if (fix) m.links[m.code_begin + offset] = {*fix, true, 0};
+                if (type == 4 && in_text(symbol, value)) {
+                    seed(value + ((u32(bytes, section + offset) & 0x03FFFFFFu) << 2));
+                } else if (type == 5) {
+                    high_at = section + offset;
+                    high_symbol = symbol;
+                } else if (type == 6 && symbol == high_symbol && in_text(symbol, value)) {
+                    seed(value + (static_cast<std::uint32_t>(u16(bytes, high_at)) << 16) +
+                         static_cast<std::uint32_t>(static_cast<std::int16_t>(u16(bytes, section + offset))));
+                }
+            } else if (type == 2 && in_text(symbol, value)) {
+                seed(value + u32(bytes, section + offset));
+            }
+        }
     }
     m.bytes = std::move(bytes);
     m.bytes.resize(m.size);

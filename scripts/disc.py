@@ -122,6 +122,8 @@ def modules(image, destination):
         head = read_at(image, sector, 0, 8)
         if head[:4] == b'SNR2':
             found.append((path.replace('/', '_'), sector, 0, size))
+        elif head[:4] == b'xff2':
+            found.append((os.path.splitext(path.replace('/', '_'))[0], sector, 0, size))
         elif head[:4] == b'AFS\0':
             count = struct.unpack_from('<I', head, 4)[0]
             table = read_at(image, sector, 8, count * 8)
@@ -133,7 +135,7 @@ def modules(image, destination):
     for name, sector, offset, length in found:
         with open(os.path.join(destination, name + '.snr'), 'wb') as out:
             out.write(read_at(image, sector, offset, length))
-    print('%d SNR2 modules extracted to %s' % (len(found), destination))
+    print('%d relocatable modules extracted to %s' % (len(found), destination))
 
 
 def open_source(source):
