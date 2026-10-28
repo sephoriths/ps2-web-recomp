@@ -162,7 +162,13 @@ std::optional<Snr2Module> read_xff_module(std::vector<std::uint8_t> bytes, const
                 const auto fix = fix_of(type);
                 if (fix) m.links[m.code_begin + offset] = {*fix, true, 0};
                 if (type == 4 && in_text(symbol, value)) {
-                    seed(value + ((u32(bytes, section + offset) & 0x03FFFFFFu) << 2));
+                    const std::uint32_t word = u32(bytes, section + offset), target = m.code_begin + value + ((word & 0x03FFFFFFu) << 2);
+                    if (!(target & 3u) && target < m.code_end) {
+                        const std::uint32_t patched = (word & 0xFC000000u) | (target >> 2);
+                        std::memcpy(bytes.data() + section + offset, &patched, 4);
+                        m.links[m.code_begin + offset] = {Fix::Jump, false, 0};
+                        m.seeds.push_back(target);
+                    }
                 } else if (type == 5) {
                     high_at = section + offset;
                     high_symbol = symbol;
