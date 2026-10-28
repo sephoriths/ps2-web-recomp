@@ -141,6 +141,9 @@
   </select>
   <button id="save-state" class="host-only" type="button" disabled title="Save the game to this device">Save state</button>
   <button id="load-state" class="host-only" type="button" disabled title="Load the quick save from this device">Load state</button>
+  <button id="export-state" class="host-only" type="button" title="Download the quick save as a .state file">Export state</button>
+  <button id="import-state" class="host-only" type="button" title="Make a .state file the quick save">Import state</button>
+  <input id="import-state-file" type="file" accept=".state" hidden>
   <label id="aa-label" class="host-only" title="Smooth jagged edges, applied immediately"><input id="aa" type="checkbox" disabled> Smooth edges</label>
   <label id="stats-label"><input id="stats-toggle" type="checkbox"> Show stats</label>
   <button id="controls-toggle" type="button" hidden>Hide controls</button>
@@ -216,6 +219,7 @@ importInput.addEventListener('change', async () => {
   storeCard(() => location.reload());
 });
 const statsEl = document.getElementById('stats');
+const statsLog = new URLSearchParams(location.search).has('statslog');
 const statsToggle = document.getElementById('stats-toggle');
 let showStats = !(matchMedia('(pointer: coarse)').matches || /[?&]touch\b/.test(location.search));
 try { const stored = localStorage.getItem('ps2web-stats'); if (stored) showStats = stored === '1'; } catch (e) {}
@@ -433,6 +437,33 @@ async function loadState() {
 
 saveStateButton.addEventListener('click', saveState);
 loadStateButton.addEventListener('click', loadState);
+document.getElementById('export-state').addEventListener('click', async () => {
+  try {
+    const record = await stateSlot();
+    if (!record) throw new Error('No quick save yet.');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([record.bytes], { type: 'application/octet-stream' }));
+    link.download = 'quicksave-' + new Date(record.savedAt).toISOString().replace(/[:.]/g, '-') + '.state';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+  } catch (error) {
+    note(error.message);
+  }
+});
+const importStateInput = document.getElementById('import-state-file');
+document.getElementById('import-state').addEventListener('click', () => importStateInput.click());
+importStateInput.addEventListener('change', async () => {
+  const file = importStateInput.files[0];
+  importStateInput.value = '';
+  if (!file) return;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await stateSlot({ bytes, digest: await stateDigest(bytes), savedAt: Date.now() });
+    note('Imported ' + file.name + ' as the quick save. Load state to use it.');
+  } catch (error) {
+    note(error.name === 'QuotaExceededError' ? 'Not enough device storage.' : error.message);
+  }
+});
 // Edge antialiasing is a display option, so it lives outside the save state
 // and takes effect on the next presented frame.
 const aaInput = document.getElementById('aa');
@@ -1116,6 +1147,7 @@ var Module = {
                             '% gs ' + ((renderIdle - lastRenderIdle) / span * 100).toFixed(0) +
                             '%   heap ' + memory + ' MB   audio ' + Module.audioQueuedMs().toFixed(0) + ' ms' +
                             (interpreted > lastInterpreted ? '   vu1 interpreted ' + Math.round((interpreted - lastInterpreted) * 1000 / span) + '/s' : '');
+      if (statsLog) console.log('[stats] ' + statsEl.textContent.replace(/\s+/g, ' '));
       lastInterpreted = interpreted;
       lastEmuIdle = emuIdle;
       lastRenderIdle = renderIdle;
