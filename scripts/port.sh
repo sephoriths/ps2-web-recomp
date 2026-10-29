@@ -98,7 +98,7 @@ if [ ${#pnach[@]} -gt 0 ]; then
 fi
 echo "${elf#$ROOT/}"
 modules=()
-if grep -q SNR2 "$elf"; then
+if grep -qE 'SNR2|xff2' "$elf"; then
   python3 -I "$here/disc.py" modules "$iso" "$game/modules"
   modules=(--modules "$game/modules")
 fi

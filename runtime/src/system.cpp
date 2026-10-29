@@ -137,7 +137,7 @@ void apply_presses() {
 void time_frames() {
     static const char *spec = std::getenv("PS2_TIME");
     if (!spec) return;
-    static const std::uint64_t from = std::strtoull(spec, nullptr, 10);
+    static const std::uint64_t from = (spec[0] == '+' ? g_frames : 0) + std::strtoull(spec + (spec[0] == '+'), nullptr, 10);
     static const std::uint64_t count = std::strchr(spec, ',') ? std::strtoull(std::strchr(spec, ',') + 1, nullptr, 10) : 500;
     static std::chrono::steady_clock::time_point start;
     if (g_frames == from) {

@@ -20,6 +20,7 @@ std::set<std::uint32_t> g_misses;
 std::set<std::string> g_module_misses;
 
 constexpr std::uint32_t kModuleMagic = 0x32524E53u;
+constexpr std::uint32_t kXffMagic = 0x32666678u;
 
 struct Instance {
     std::uint32_t base;
@@ -34,7 +35,7 @@ std::vector<Instance> g_instances;
 bool loaded_at(const ModuleInfo &m, std::uint32_t base) {
     if (m.fixed_base) {
         if (base != m.fixed_base) return false;
-    } else if (ld32(base + 0x2Cu) != m.size) {
+    } else if (ld32(base + (ld32(base) == kXffMagic ? 0x14u : 0x2Cu)) != m.size) {
         return false;
     }
     for (std::uint32_t k = 0; k < m.check_count; ++k)
@@ -78,7 +79,7 @@ const Instance *instance_for(std::uint32_t pc) {
         }
     }
     for (std::uint32_t at = pc & ~15u; pc - at < g_module_span; at -= 16) {
-        if (ld32(at) == kModuleMagic) {
+        if (ld32(at) == kModuleMagic || ld32(at) == kXffMagic) {
             for (std::uint32_t k = 0; k < g_module_count; ++k)
                 if (pc - at < g_modules[k].size && loaded_at(g_modules[k], at)) {
                     g_instances.push_back(make_instance(at, &g_modules[k]));

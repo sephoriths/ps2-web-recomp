@@ -20,7 +20,7 @@ namespace {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: ps2run <elf> [--arg text]... [--frames n] [--ntsc] [--misses file]\n"
+                 "usage: ps2run <elf> [--arg text]... [--frames n] [--run n] [--ntsc] [--misses file]\n"
                  "              [--disc image.iso] [--memcard card.ps2] [--pal | --ntsc] [--trace-syscalls] [--trace-io] [--trace-threads]\n"
                  "              [--trace-iop] [--trace-iop-hle] [--frames-dir dir] [--frame-every n]\n"
                  "              [--press frame:button[+button][:frames]]... [--window] [--fullscreen]\n"
@@ -35,10 +35,12 @@ int main(int argc, char **argv) {
     std::vector<std::string> args{argv[1]};
     [[maybe_unused]] bool window = false, fullscreen = false;
     std::string load_path;
+    std::uint64_t run_frames = 0;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--arg" && i + 1 < argc) args.push_back(argv[++i]);
         else if (a == "--frames" && i + 1 < argc) ps2::g_options.max_frames = std::strtoull(argv[++i], nullptr, 10);
+        else if (a == "--run" && i + 1 < argc) run_frames = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--ntsc" || a == "--pal") {
             ps2::g_options.pal = a == "--pal";
             ps2::g_options.rate_forced = true;
@@ -95,6 +97,7 @@ int main(int argc, char **argv) {
         }
         ps2::boot(entry, args);
         if (!load_path.empty() && !ps2::load_state(load_path)) return 1;
+        if (run_frames) ps2::g_options.max_frames = ps2::frame_count() + run_frames;
 #ifdef PS2_PROFILE
         const char *profile = std::getenv("PS2_PROFILE");
         const char *profile_from = std::getenv("PS2_PROFILE_FROM");

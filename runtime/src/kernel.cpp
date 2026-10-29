@@ -9,6 +9,7 @@
 #include "ps2/state.hpp"
 
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 #include <cstdio>
 #include <cstdlib>
@@ -75,6 +76,19 @@ struct Alarm {
 
 std::map<int, Thread> g_threads;
 std::map<int, Semaphore> g_semas;
+std::array<Semaphore *, 256> g_sema_index{};
+
+void index_semas() {
+    g_sema_index.fill(nullptr);
+    for (auto &[id, sema] : g_semas)
+        if (id >= 0 && id < 256) g_sema_index[static_cast<std::size_t>(id)] = &sema;
+}
+
+Semaphore *find_sema(int id) {
+    if (id >= 0 && id < 256) return g_sema_index[static_cast<std::size_t>(id)];
+    const auto it = g_semas.find(id);
+    return it == g_semas.end() ? nullptr : &it->second;
+}
 std::vector<Handler> g_intc_handlers;
 std::vector<Handler> g_dmac_handlers;
 std::map<int, Alarm> g_alarms;
@@ -329,12 +343,12 @@ void write_thread_status(int id, std::uint32_t p) {
 }
 
 void signal_sema(Cpu &c, int id, bool interrupt) {
-    auto it = g_semas.find(id);
-    if (it == g_semas.end()) {
+    Semaphore *found = find_sema(id);
+    if (!found) {
         ret(c, -1);
         return;
     }
-    Semaphore &s = it->second;
+    Semaphore &s = *found;
     ret(c, id);
     if (!s.waiters.empty()) {
         const int waiter = s.waiters.front();
@@ -347,12 +361,12 @@ void signal_sema(Cpu &c, int id, bool interrupt) {
 }
 
 void wait_sema(Cpu &c, int id) {
-    auto it = g_semas.find(id);
-    if (it == g_semas.end()) {
+    Semaphore *found = find_sema(id);
+    if (!found) {
         ret(c, -1);
         return;
     }
-    Semaphore &s = it->second;
+    Semaphore &s = *found;
     ret(c, id);
     if (s.count > 0) {
         --s.count;
@@ -373,6 +387,7 @@ const char *syscall_name(std::uint32_t n);
 void reset() {
     g_threads.clear();
     g_semas.clear();
+    index_semas();
     g_intc_handlers.clear();
     g_dmac_handlers.clear();
     g_alarms.clear();
@@ -462,6 +477,8 @@ void dump() {
 }
 
 void handle_syscall(Cpu &c, std::uint32_t pc) {
+    static const int cost = std::getenv("PS2_SYSCALL_CYCLES") ? std::atoi(std::getenv("PS2_SYSCALL_CYCLES")) : 300;
+    c.budget -= cost;
     std::uint32_t n = c.r[3].w[0];
     const bool interrupt_variant = (n & 0x80000000u) != 0;
     if (interrupt_variant) n = 0u - n;
@@ -661,6 +678,7 @@ void handle_syscall(Cpu &c, std::uint32_t pc) {
         const int id = lowest_free(g_semas, 256, 0);
         if (id < 0) { ret(c, -1); break; }
         g_semas[id] = s;
+        index_semas();
         ret(c, id);
         break;
     }
@@ -670,6 +688,7 @@ void handle_syscall(Cpu &c, std::uint32_t pc) {
         for (int waiter : it->second.waiters)
             if (Thread *t = thread(waiter)) release(*t, -425);
         g_semas.erase(it);
+        index_semas();
         ret(c, static_cast<std::int32_t>(arg(c, 0)));
         reschedule(c);
         break;
@@ -882,6 +901,7 @@ void state(ps2::state::Stream &s) {
         s.pod(v.option);
         s.deque(v.waiters);
     });
+    index_semas();
     s.vec(g_intc_handlers);
     s.vec(g_dmac_handlers);
     s.map(g_alarms);

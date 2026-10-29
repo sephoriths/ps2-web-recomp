@@ -63,7 +63,7 @@ std::vector<std::pair<std::uint32_t, std::uint32_t>> checks_for(const Snr2Module
     std::vector<std::uint32_t> words;
     for (std::uint32_t pc = m.code_begin; pc + 4 <= m.code_end; pc += 4)
         if (program.is_code(pc) && !m.links.count(pc) && word_at(m, pc)) words.push_back(pc);
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> checks{{0, 0x32524E53u}};
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> checks{{0, word_at(m, 0)}};
     for (std::size_t k = 0; k < 8 && !words.empty(); ++k) {
         const std::uint32_t pc = words[k * words.size() / 8];
         if (checks.back().first != pc) checks.emplace_back(pc, word_at(m, pc));
@@ -81,7 +81,8 @@ std::vector<Snr2Module> read_modules(const std::string &dir) {
     for (const auto &path : paths) {
         std::ifstream file(path, std::ios::binary);
         std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(file), {}};
-        auto module = read_snr2_module(std::move(bytes));
+        auto module = read_snr2_module(bytes);
+        if (!module) module = read_xff_module(std::move(bytes), path.stem().string());
         if (!module) continue;
         if (std::any_of(modules.begin(), modules.end(), [&](const Snr2Module &m) { return m.bytes == module->bytes; })) continue;
         if (const int n = names[module->name]++) module->name += "_" + std::to_string(n + 1);
@@ -173,7 +174,11 @@ int main(int argc, char **argv) {
 
     try {
         const Image image = Image::load(elf_path);
-        const Entries entries = entries_path.empty() ? Entries{} : read_entries(entries_path);
+        Entries entries = entries_path.empty() ? Entries{} : read_entries(entries_path);
+        const std::vector<Snr2Module> modules = modules_dir.empty() ? std::vector<Snr2Module>{} : read_modules(modules_dir);
+        for (const Snr2Module &m : modules)
+            for (const std::uint32_t seed : m.host_seeds)
+                if (image.executable(seed)) entries.main.push_back(seed);
         const Links imports = snr2_imports(image);
         Program program = analyse(image, entries.main, dynamic_sites(imports));
         std::map<Op, std::size_t> histogram;
@@ -186,7 +191,6 @@ int main(int argc, char **argv) {
             for (const auto &[op, count] : histogram) std::printf("%10zu %s\n", count, name(op));
 
         std::vector<Translation> translations{{&image, &program, imports.empty() ? nullptr : &imports, "", false, "", 0, {}}};
-        const std::vector<Snr2Module> modules = modules_dir.empty() ? std::vector<Snr2Module>{} : read_modules(modules_dir);
         std::deque<Image> images;
         std::deque<Program> programs;
         std::size_t module_code = 0;

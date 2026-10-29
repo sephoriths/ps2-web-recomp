@@ -9,6 +9,7 @@
 #endif
 
 #include "ps2/state.hpp"
+#include "ps2/system.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -481,6 +482,184 @@ void reset() {
     else render_reset();
 }
 
+namespace capture {
+
+struct Batch {
+    bool open = false;
+    std::uint64_t prim = 0, frame = 0, zbuf = 0, tex0 = 0, tex1 = 0, clamp = 0, alpha = 0, test = 0;
+    int ctx = 0;
+    std::uint64_t first = 0, count = 0;
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0, u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+};
+
+std::FILE *g_log = nullptr;
+std::string g_dir;
+std::uint64_t g_from = 0, g_frames = 1, g_draws = 0, g_images = 0;
+bool g_every = false, g_done = false;
+Batch g_batch;
+std::uint64_t g_target = ~0ull;
+int g_target_rows = 0;
+
+bool active() {
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        const char *spec = std::getenv("PS2_CAPTURE");
+        if (!spec) {
+            g_done = true;
+            return false;
+        }
+        const std::string text = spec;
+        const auto first = text.find(','), second = text.find(',', first + 1);
+        if (first == std::string::npos) {
+            g_done = true;
+            return false;
+        }
+        g_from = std::strtoull(text.c_str(), nullptr, 10);
+        g_dir = text.substr(first + 1, second == std::string::npos ? std::string::npos : second - first - 1);
+        if (second != std::string::npos) g_frames = std::max<std::uint64_t>(1, std::strtoull(text.c_str() + second + 1, nullptr, 10));
+        g_every = std::getenv("PS2_CAPTURE_EVERY") != nullptr;
+    }
+    if (g_done) return false;
+    const std::uint64_t frame = frame_count();
+    if (frame < g_from || frame >= g_from + g_frames) return false;
+    if (!g_log) {
+        g_log = std::fopen((g_dir + "/draws.tsv").c_str(), "w");
+        if (!g_log) {
+            g_done = true;
+            return false;
+        }
+        std::fprintf(g_log, "draw\tprims\tfirst\tctx\tprim\tframe\tzbuf\ttex0\ttex1\tclamp\talpha\ttest\tbox\ttexels\n");
+    }
+    return true;
+}
+
+void dump_target(std::uint64_t frame, int rows, const char *why) {
+    const std::uint32_t fbp = static_cast<std::uint32_t>(frame) & 0x1FFu, fbw = static_cast<std::uint32_t>(frame >> 16) & 0x3Fu, psm = static_cast<std::uint32_t>(frame >> 24) & 0x3Fu;
+    if (!fbw || rows <= 0) return;
+#ifdef PS2_GPU
+    if (gpu_on() && !cpu_raster()) gpu::download(g_memory);
+#endif
+    const std::uint32_t w = std::min<std::uint32_t>(fbw * 64u, 2048u), h = static_cast<std::uint32_t>(std::min(rows, 2048));
+    char name[96];
+    std::snprintf(name, sizeof name, "%06llu_fbp%03X_psm%02X.ppm", static_cast<unsigned long long>(g_images++), fbp, psm);
+    if (std::FILE *f = std::fopen((g_dir + "/" + name).c_str(), "wb")) {
+        std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+        std::vector<std::uint8_t> row(w * 3);
+        for (std::uint32_t y = 0; y < h; ++y) {
+            for (std::uint32_t x = 0; x < w; ++x) {
+                const std::uint32_t c = read_pixel(psm, fbp * 32u, fbw, x, y);
+                row[x * 3] = static_cast<std::uint8_t>(c);
+                row[x * 3 + 1] = static_cast<std::uint8_t>(c >> 8);
+                row[x * 3 + 2] = static_cast<std::uint8_t>(c >> 16);
+            }
+            std::fwrite(row.data(), 1, row.size(), f);
+        }
+        std::fclose(f);
+    }
+    std::fprintf(g_log, "image\t%s\t%s\n", name, why);
+}
+
+std::uint64_t target_of(std::uint64_t frame) { return frame & 0x3F3F01FFull; }
+
+void flush() {
+    Batch &b = g_batch;
+    if (!b.open) return;
+    b.open = false;
+    std::fprintf(g_log, "%llu\t%llu\t%llu\t%d\t%03llX\t%016llX\t%016llX\t%016llX\t%016llX\t%016llX\t%016llX\t%016llX\t%.1f,%.1f-%.1f,%.1f\t%.1f,%.1f-%.1f,%.1f\n",
+                 static_cast<unsigned long long>(g_draws++), static_cast<unsigned long long>(b.count), static_cast<unsigned long long>(b.first), b.ctx,
+                 static_cast<unsigned long long>(b.prim & 0x7FFu), static_cast<unsigned long long>(b.frame), static_cast<unsigned long long>(b.zbuf),
+                 static_cast<unsigned long long>(b.tex0), static_cast<unsigned long long>(b.tex1), static_cast<unsigned long long>(b.clamp),
+                 static_cast<unsigned long long>(b.alpha), static_cast<unsigned long long>(b.test), b.x0, b.y0, b.x1, b.y1, b.u0, b.v0, b.u1, b.v1);
+    if (g_every) dump_target(b.frame, g_target_rows, "after draw");
+}
+
+void switch_target(std::uint64_t frame) {
+    if (target_of(frame) == g_target) return;
+    flush();
+    if (g_target != ~0ull) dump_target(g_target, g_target_rows, "before another target");
+    g_target = target_of(frame);
+    g_target_rows = 0;
+}
+
+void prim(const State &s, int needed) {
+    if (!active()) return;
+    const std::uint64_t prim = (s.prmodecont & 1u) ? s.prim : ((s.prim & 7u) | (s.prmode & ~7ull));
+    const int c = static_cast<int>(prim >> 9) & 1;
+    const Context &x = s.ctx[c];
+    Batch &b = g_batch;
+    switch_target(x.frame);
+    if (!b.open || b.prim != (prim & 0x7FFu) || b.ctx != c || b.frame != x.frame || b.zbuf != x.zbuf || b.tex0 != x.tex0 || b.tex1 != x.tex1 ||
+        b.clamp != x.clamp || b.alpha != x.alpha || b.test != x.test) {
+        flush();
+        b = Batch{};
+        b.open = true;
+        b.prim = prim & 0x7FFu;
+        b.ctx = c;
+        b.frame = x.frame;
+        b.zbuf = x.zbuf;
+        b.tex0 = x.tex0;
+        b.tex1 = x.tex1;
+        b.clamp = x.clamp;
+        b.alpha = x.alpha;
+        b.test = x.test;
+        b.first = g_primitives;
+        b.x0 = b.y0 = b.u0 = b.v0 = 1e30f;
+        b.x1 = b.y1 = b.u1 = b.v1 = -1e30f;
+    }
+    ++b.count;
+    const float ox = static_cast<float>(x.xyoffset & 0xFFFFu) / 16.0f, oy = static_cast<float>((x.xyoffset >> 32) & 0xFFFFu) / 16.0f;
+    const float tw = static_cast<float>(1u << ((x.tex0 >> 26) & 15u)), th = static_cast<float>(1u << ((x.tex0 >> 30) & 15u));
+    for (int i = 0; i < needed; ++i) {
+        const Vertex &v = s.queue[i];
+        const float px = static_cast<float>(v.x) / 16.0f - ox, py = static_cast<float>(v.y) / 16.0f - oy;
+        b.x0 = std::min(b.x0, px);
+        b.y0 = std::min(b.y0, py);
+        b.x1 = std::max(b.x1, px);
+        b.y1 = std::max(b.y1, py);
+        float u = static_cast<float>(v.u) / 16.0f, w = static_cast<float>(v.v) / 16.0f;
+        if (!(prim & 0x100u)) {
+            const float q = v.q == 0.0f ? 1.0f : v.q;
+            u = v.s / q * tw;
+            w = v.t / q * th;
+        }
+        b.u0 = std::min(b.u0, u);
+        b.v0 = std::min(b.v0, w);
+        b.u1 = std::max(b.u1, u);
+        b.v1 = std::max(b.v1, w);
+        g_target_rows = std::max(g_target_rows, static_cast<int>(py) + 1);
+    }
+}
+
+void transfer(const State &s, std::uint64_t dir) {
+    if (!active()) return;
+    flush();
+    std::fprintf(g_log, "transfer\tdir %llu\tbitbltbuf %016llX\ttrxpos %016llX\ttrxreg %016llX\n", static_cast<unsigned long long>(dir & 3u),
+                 static_cast<unsigned long long>(s.bitbltbuf), static_cast<unsigned long long>(s.trxpos), static_cast<unsigned long long>(s.trxreg));
+    if ((dir & 3u) == 2u && g_target != ~0ull) {
+        dump_target(g_target, g_target_rows, "before a local copy");
+        g_target = ~0ull;
+    }
+}
+
+void vblank() {
+    if (g_done) return;
+    const bool was = g_log != nullptr;
+    if (active()) {
+        flush();
+        std::fprintf(g_log, "vblank\t%llu\n", static_cast<unsigned long long>(frame_count()));
+    } else if (was) {
+        flush();
+        if (g_target != ~0ull) dump_target(g_target, g_target_rows, "end of capture");
+        std::fclose(g_log);
+        g_log = nullptr;
+        g_done = true;
+        std::fprintf(stderr, "[gs] captured %llu draws and %llu images in %s\n", static_cast<unsigned long long>(g_draws), static_cast<unsigned long long>(g_images), g_dir.c_str());
+    }
+}
+
+}
+
 void kick(bool draw) {
     State &s = g_state;
     const std::uint32_t prim = static_cast<std::uint32_t>(s.prim) & 7u;
@@ -491,6 +670,7 @@ void kick(bool draw) {
 #ifdef PS2_GPU
         if (gpu_on()) gpu::draw(s, s.queue, needed);
 #endif
+        capture::prim(s, needed);
         ++g_primitives;
     }
     switch (prim) {
@@ -606,6 +786,7 @@ void write(std::uint32_t reg, std::uint64_t value) {
             std::fprintf(stderr, "[gs] trx dir %llu buf 0x%016llX pos 0x%016llX reg 0x%016llX\n", static_cast<unsigned long long>(value & 3u),
                          static_cast<unsigned long long>(s.bitbltbuf), static_cast<unsigned long long>(s.trxpos), static_cast<unsigned long long>(s.trxreg));
         }
+        capture::transfer(s, value);
         s.trxdir = value;
         g_transfer = Transfer{};
         g_carried = 0;
@@ -846,6 +1027,7 @@ void write_privileged(std::uint32_t address, std::uint64_t value) {
 
 void vblank(bool start) {
     if (start) {
+        capture::vblank();
         g_odd_field = !g_odd_field;
         raise(8);
         if (queue::active()) queue::post(queue::kVblank, 0, 0, nullptr, 0);
