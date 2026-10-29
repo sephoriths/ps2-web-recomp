@@ -56,9 +56,14 @@ generated="$ROOT/generated/$name"
 native="$ROOT/build/native-$name"
 tools="$ROOT/build/tools"
 export EMSDK="${EMSDK:-$ROOT/tools/emsdk}"
-setup=()
-[ "$web" = 1 ] || setup=(--native-only)
-if { [ "$web" = 1 ] && [ ! -f "$EMSDK/emsdk_env.sh" ]; } || [ ! -x "$tools/eerecomp" ] || [ ! -x "$tools/vurecomp" ]; then "$here/setup.sh" "${setup[@]}"; fi
+# Avoid expanding an empty array with `set -u` on macOS Bash 3.2.
+if { [ "$web" = 1 ] && [ ! -f "$EMSDK/emsdk_env.sh" ]; } || [ ! -x "$tools/eerecomp" ] || [ ! -x "$tools/vurecomp" ]; then
+  if [ "$web" = 1 ]; then
+    "$here/setup.sh"
+  else
+    "$here/setup.sh" --native-only
+  fi
+fi
 mkdir -p "$game/disc" "$game/vu1" "$game/shots" "$generated"
 
 echo "== [1/6] disc"
@@ -66,7 +71,8 @@ iso="$game/disc.iso"
 if [ -e "$iso" ]; then
   echo "already in place"
 else
-  case "${source_path,,}" in
+  source_path_lower=$(printf "%s" "$source_path" | tr '[:upper:]' '[:lower:]')
+  case "$source_path_lower" in
     *.zip|*.bin|*.cue|*.img) python3 -I "$here/disc.py" iso "$source_path" "$iso" ;;
     *.7z) 7z e -so -r "$source_path" '*.iso' > "$iso" ;;
     *) ln -s "$(realpath "$source_path")" "$iso" ;;
@@ -98,7 +104,7 @@ if [ ${#pnach[@]} -gt 0 ]; then
 fi
 echo "${elf#$ROOT/}"
 modules=()
-if grep -qE 'SNR2|xff2' "$elf"; then
+if grep -q SNR2 "$elf"; then
   python3 -I "$here/disc.py" modules "$iso" "$game/modules"
   modules=(--modules "$game/modules")
 fi
@@ -109,7 +115,13 @@ if windows=$(python3 -I "$here/windows.py" list "$elf") && [ -n "$windows" ]; th
   echo "code windows the game rewrites: $(echo "$windows" | tr '\n' ' ')"
 fi
 
-translate() { "$tools/eerecomp" "$elf" --entries "$game/entries.txt" "${modules[@]}" "${overlays[@]}" --out "$generated" | tail -1; }
+translate() {
+  # Bash 3.2 (the macOS system Bash) treats empty arrays as unset under
+  # `set -u`, so temporarily disable nounset while expanding optional arrays.
+  set +u
+  "$tools/eerecomp" "$elf" --entries "$game/entries.txt" "${modules[@]}" "${overlays[@]}" --out "$generated" | tail -1
+  set -u
+}
 
 echo "== [3/6] machine code to C++"
 touch "$game/entries.txt"
