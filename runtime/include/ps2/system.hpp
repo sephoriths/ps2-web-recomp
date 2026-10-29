@@ -118,6 +118,7 @@ void start_render_thread();
 void start_vu_thread();
 void run_vu_thread();
 double vu_thread_idle_ms();
+double thread_waited_ms(int role);
 std::uint64_t vu1_interpreted_calls();
 void post_present();
 enum class Rendered { idle, presented, busy };

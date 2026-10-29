@@ -258,7 +258,18 @@ void present() {
 
 constexpr Uint32 kAudioBytesPerMs = 48 * 4;
 
+std::atomic<double> g_paced_ms{0.0};
+
+struct PaceTimer {
+    std::uint64_t start = SDL_GetPerformanceCounter();
+    ~PaceTimer() {
+        const double ms = static_cast<double>(SDL_GetPerformanceCounter() - start) * 1000.0 / static_cast<double>(SDL_GetPerformanceFrequency());
+        g_paced_ms.store(g_paced_ms.load() + ms);
+    }
+};
+
 void pace() {
+    const PaceTimer timer;
     if (g_audio) {
         // The audio device clock paces emulation: wait while more than ~80 ms of sound is queued.
         while (SDL_GetQueuedAudioSize(g_audio) > 80 * kAudioBytesPerMs) SDL_Delay(1);
@@ -298,24 +309,32 @@ double resident_mb() {
 
 void show_speed() {
     static std::uint64_t start = 0, frames = 0;
-    static double cpu_start = 0.0, gpu_start = 0.0;
+    static double cpu_start = 0.0, gpu_start = 0.0, emu_start = 0.0, vu_start = 0.0, gs_start = 0.0;
+    const auto emu_idle = [] { return ps2::thread_waited_ms(0) + g_paced_ms.load(); };
     const std::uint64_t now = SDL_GetPerformanceCounter();
     if (!start) {
         start = now;
         cpu_start = process_cpu_seconds();
         gpu_start = ps2::gpu_busy_ms();
+        emu_start = emu_idle();
+        vu_start = ps2::vu_thread_idle_ms();
+        gs_start = ps2::thread_waited_ms(2);
     }
     ++frames;
     const double seconds = static_cast<double>(now - start) / static_cast<double>(SDL_GetPerformanceFrequency());
     if (seconds < 1.0) return;
-    const double cpu = process_cpu_seconds(), gpu = ps2::gpu_busy_ms();
-    char title[192];
+    const double cpu = process_cpu_seconds(), gpu = ps2::gpu_busy_ms(), emu = emu_idle(), vu = ps2::vu_thread_idle_ms(), gs = ps2::thread_waited_ms(2);
+    char title[256];
     const double queued = g_audio ? SDL_GetQueuedAudioSize(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
-    std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  RAM %.0f MB  audio %.0f ms", static_cast<double>(frames) / seconds,
-                  (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0), resident_mb(), queued);
+    std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  idle emu %.0f%% vu %.0f%% gs %.0f%%  RAM %.0f MB  audio %.0f ms",
+                  static_cast<double>(frames) / seconds, (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0),
+                  (emu - emu_start) / (seconds * 10.0), (vu - vu_start) / (seconds * 10.0), (gs - gs_start) / (seconds * 10.0), resident_mb(), queued);
     SDL_SetWindowTitle(g_window, title);
     start = now;
     frames = 0;
+    emu_start = emu;
+    vu_start = vu;
+    gs_start = gs;
     cpu_start = cpu;
     gpu_start = gpu;
 }

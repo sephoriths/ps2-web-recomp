@@ -1,6 +1,7 @@
 #include "queue.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstring>
@@ -26,6 +27,15 @@ constexpr std::uint64_t align16(std::uint64_t n) { return (n + 15) & ~15ull; }
 
 Ring g_render, g_vu;
 thread_local Role g_role = Role::Emulation;
+std::atomic<std::uint64_t> g_waited_us[3] = {};
+
+struct WaitTimer {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~WaitTimer() {
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+        g_waited_us[static_cast<int>(g_role)].fetch_add(static_cast<std::uint64_t>(us), std::memory_order_relaxed);
+    }
+};
 
 #if defined(__linux__) && !defined(__EMSCRIPTEN__)
 void futex_wait(std::atomic<std::uint32_t> &word, std::uint32_t seen, int timeout_ms) {
@@ -45,7 +55,10 @@ EM_ASYNC_JS(void, ps2_wait_async, (std::atomic<std::uint32_t> *word, std::uint32
 });
 #endif
 
+double waited_ms(Role role) { return static_cast<double>(g_waited_us[static_cast<int>(role)].load(std::memory_order_relaxed)) / 1000.0; }
+
 void wait(std::atomic<std::uint32_t> &value, std::uint32_t seen) {
+    const WaitTimer timer;
 #ifdef __EMSCRIPTEN__
     emscripten_futex_wait(&value, seen, INFINITY);
 #elif defined(__linux__)
@@ -135,7 +148,14 @@ void Ring::pop(const Header &header) {
 
 void Ring::wake() {
     posted_.fetch_add(1);
+#if !defined(__EMSCRIPTEN__) && !defined(__linux__)
+    if (consumer_waiting_.exchange(0)) {
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        wake_cv_.notify_all();
+    }
+#else
     if (consumer_waiting_.exchange(0)) notify(posted_);
+#endif
 }
 
 void Ring::wait_for_work(int timeout_ms) {
@@ -145,14 +165,18 @@ void Ring::wait_for_work(int timeout_ms) {
         consumer_waiting_.store(0);
         return;
     }
+    const WaitTimer timer;
 #ifdef __EMSCRIPTEN__
     if (emscripten_is_main_browser_thread()) ps2_wait_async(&posted_, seen, timeout_ms);
     else emscripten_futex_wait(&posted_, seen, timeout_ms);
 #elif defined(__linux__)
     futex_wait(posted_, seen, timeout_ms);
 #else
-    (void)seen;
-    std::this_thread::sleep_for(std::chrono::milliseconds(std::min(timeout_ms, 1)));
+    std::unique_lock<std::mutex> lock(wake_mutex_);
+    const auto woken = [&] { return posted_.load() != seen || head_.load() != tail_.load(); };
+    if (timeout_ms < 0) wake_cv_.wait(lock, woken);
+    else wake_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), woken);
+    consumer_waiting_.store(0);
 #endif
 }
 

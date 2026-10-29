@@ -1,6 +1,10 @@
 #pragma once
 
 #include <atomic>
+#if !defined(__EMSCRIPTEN__) && !defined(__linux__)
+#include <condition_variable>
+#include <mutex>
+#endif
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -33,6 +37,10 @@ private:
     alignas(64) std::atomic<std::uint32_t> posted_{0};
     alignas(64) std::atomic<std::uint32_t> freed_{0};
     std::atomic<std::uint32_t> consumer_waiting_{0}, producer_waiting_{0};
+#if !defined(__EMSCRIPTEN__) && !defined(__linux__)
+    std::mutex wake_mutex_;
+    std::condition_variable wake_cv_;
+#endif
 };
 
 Ring &render();
@@ -45,6 +53,7 @@ bool vu_active();
 void post(Type type, std::uint32_t arg0, std::uint32_t arg1, const void *data, std::uint32_t bytes);
 
 void wait(std::atomic<std::uint32_t> &value, std::uint32_t seen);
+double waited_ms(Role role);
 void notify(std::atomic<std::uint32_t> &value);
 
 }
