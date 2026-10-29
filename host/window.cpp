@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -310,6 +311,7 @@ double resident_mb() {
 void show_speed() {
     static std::uint64_t start = 0, frames = 0;
     static double cpu_start = 0.0, gpu_start = 0.0, emu_start = 0.0, vu_start = 0.0, gs_start = 0.0;
+    static std::uint64_t interpreted_start = 0;
     const auto emu_idle = [] { return ps2::thread_waited_ms(0) + g_paced_ms.load(); };
     const std::uint64_t now = SDL_GetPerformanceCounter();
     if (!start) {
@@ -319,22 +321,29 @@ void show_speed() {
         emu_start = emu_idle();
         vu_start = ps2::vu_thread_idle_ms();
         gs_start = ps2::thread_waited_ms(2);
+        interpreted_start = ps2::vu1_interpreted_calls();
     }
     ++frames;
     const double seconds = static_cast<double>(now - start) / static_cast<double>(SDL_GetPerformanceFrequency());
     if (seconds < 1.0) return;
     const double cpu = process_cpu_seconds(), gpu = ps2::gpu_busy_ms(), emu = emu_idle(), vu = ps2::vu_thread_idle_ms(), gs = ps2::thread_waited_ms(2);
+    const std::uint64_t interpreted = ps2::vu1_interpreted_calls();
     char title[256];
     const double queued = g_audio ? SDL_GetQueuedAudioSize(g_audio) / static_cast<double>(kAudioBytesPerMs) : 0.0;
     std::snprintf(title, sizeof title, "ps2-web-recomp  %.1f fps  CPU %.0f%%  GPU %.0f%%  idle emu %.0f%% vu %.0f%% gs %.0f%%  RAM %.0f MB  audio %.0f ms",
                   static_cast<double>(frames) / seconds, (cpu - cpu_start) / seconds * 100.0, (gpu - gpu_start) / (seconds * 10.0),
                   (emu - emu_start) / (seconds * 10.0), (vu - vu_start) / (seconds * 10.0), (gs - gs_start) / (seconds * 10.0), resident_mb(), queued);
+    if (interpreted > interpreted_start) {
+        const std::size_t used = std::strlen(title);
+        std::snprintf(title + used, sizeof title - used, "  vu1 interpreted %.0f/s", static_cast<double>(interpreted - interpreted_start) / seconds);
+    }
     SDL_SetWindowTitle(g_window, title);
     start = now;
     frames = 0;
     emu_start = emu;
     vu_start = vu;
     gs_start = gs;
+    interpreted_start = interpreted;
     cpu_start = cpu;
     gpu_start = gpu;
 }
