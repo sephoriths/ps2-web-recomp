@@ -6,6 +6,10 @@
 #include <SDL_syswm.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <SDL_metal.h>
+#include <mach/mach.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -83,6 +87,18 @@ bool attach_gpu() {
     SDL_GetWindowSizeInPixels(g_window, &w, &h);
     target.width = static_cast<std::uint32_t>(w);
     target.height = static_cast<std::uint32_t>(h);
+#ifdef __APPLE__
+    if (info.subsystem == SDL_SYSWM_COCOA) {
+        SDL_MetalView view = SDL_Metal_CreateView(g_window);
+        if (!view) return false;
+        target.kind = ps2::WindowTarget::Metal;
+        target.surface = SDL_Metal_GetLayer(view);
+        SDL_Metal_GetDrawableSize(g_window, &w, &h);
+        target.width = static_cast<std::uint32_t>(w);
+        target.height = static_cast<std::uint32_t>(h);
+        return target.surface && ps2::attach_window(target);
+    }
+#endif
     switch (info.subsystem) {
 #if defined(SDL_VIDEO_DRIVER_X11)
     case SDL_SYSWM_X11:
@@ -198,7 +214,11 @@ void poll() {
         }
         if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED && g_gpu_present) {
             int w = 0, h = 0;
+#ifdef __APPLE__
+            SDL_Metal_GetDrawableSize(g_window, &w, &h);
+#else
             SDL_GetWindowSizeInPixels(g_window, &w, &h);
+#endif
             ps2::resize_window(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
         }
         if (e.type == SDL_CONTROLLERDEVICEADDED) open_pad(e.cdevice.which);
@@ -262,6 +282,12 @@ double process_cpu_seconds() {
 }
 
 double resident_mb() {
+#ifdef __APPLE__
+    mach_task_basic_info_data_t task{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&task), &count) != KERN_SUCCESS) return 0.0;
+    return static_cast<double>(task.resident_size) / (1024.0 * 1024.0);
+#endif
     long pages = 0, resident = 0;
     if (std::FILE *f = std::fopen("/proc/self/statm", "r")) {
         if (std::fscanf(f, "%ld %ld", &pages, &resident) != 2) resident = 0;
@@ -313,7 +339,12 @@ bool open_window(bool fullscreen) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());
         return false;
     }
-    const Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u);
+#ifdef __APPLE__
+    const Uint32 metal = std::getenv("PS2_SDL_RENDERER") ? 0u : SDL_WINDOW_METAL;
+#else
+    const Uint32 metal = 0u;
+#endif
+    const Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | metal | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u);
     g_window = SDL_CreateWindow("ps2-web-recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, ps2::g_options.widescreen ? 1280 : 960, 720, flags);
     if (!g_window) {
         std::fprintf(stderr, "SDL: %s\n", SDL_GetError());

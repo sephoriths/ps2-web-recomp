@@ -437,12 +437,6 @@ bool read_rect(const std::uint32_t *rec, const std::uint32_t *setup, int &u0, in
     return true;
 }
 
-Range read_range(const std::uint32_t *rec, const std::uint32_t *setup, const Range &whole) {
-    int u0, v0, u1, v1;
-    if (!read_rect(rec, setup, u0, v0, u1, v1)) return whole;
-    return region(setup[12], setup[13], setup[14], u0, v0, u1, v1);
-}
-
 Range pages(std::uint32_t bp, std::uint32_t bw, std::uint32_t psm, int x0, int y0, int x1, int y1) {
     std::uint32_t pw, ph;
     page_size(psm, pw, ph);
@@ -1714,7 +1708,11 @@ bool attach_surface(const SurfaceTarget &target) {
 #else
     WGPUSurfaceSourceXlibWindow xlib = WGPU_SURFACE_SOURCE_XLIB_WINDOW_INIT;
     WGPUSurfaceSourceWaylandSurface wayland = WGPU_SURFACE_SOURCE_WAYLAND_SURFACE_INIT;
-    if (target.kind == SurfaceTarget::X11) {
+    WGPUSurfaceSourceMetalLayer metal = WGPU_SURFACE_SOURCE_METAL_LAYER_INIT;
+    if (target.kind == SurfaceTarget::Metal) {
+        metal.layer = target.surface;
+        sd.nextInChain = &metal.chain;
+    } else if (target.kind == SurfaceTarget::X11) {
         xlib.display = target.display;
         xlib.window = target.window;
         sd.nextInChain = &xlib.chain;
